@@ -246,7 +246,35 @@ Keeps webcam previews current.
 
 # 📱 Screenshots
 
-(Add screenshots here)
+# 📱 Screenshots
+
+## Splash Screen
+
+![Splash Screen](assets/screenshots/splash.jpg)
+
+## Interactive Globe
+
+![Globe](assets/screenshots/globe.jpg)
+
+## Country Search
+
+![Search](assets/screenshots/search.jpg)
+
+## Italy Webcams
+
+![Italy](assets/screenshots/italy_webcams.jpg)
+
+## Webcam Detail Sheet 1
+
+![Detail](assets/screenshots/detail_sheet_1.jpg)
+
+## Webcam Detail Sheet 2
+
+![Detail](assets/screenshots/detail_sheet_2.jpg)
+
+## Webcam Player
+
+![Player](assets/screenshots/player.jpg)
 
 ```
 /assets/screenshots/
