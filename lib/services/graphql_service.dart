@@ -21,4 +21,36 @@ class GraphQLService {
       }
     }
   """;
+
+  static const String getCountryByCodeQuery = """
+    query GetCountryByCode(\$code: ID!) {
+      country(code: \$code) {
+        name
+        capital
+        emoji
+        code
+      }
+    }
+  """;
+
+  static Future<Map<String, dynamic>?> fetchCountryByCode(String code) async {
+    final normalizedCode = code.trim().toUpperCase();
+    if (normalizedCode.isEmpty) return null;
+
+    final result = await client.value.query(
+      QueryOptions(
+        document: gql(getCountryByCodeQuery),
+        variables: {'code': normalizedCode},
+        fetchPolicy: FetchPolicy.networkOnly,
+      ),
+    );
+
+    if (result.hasException) {
+      throw result.exception!;
+    }
+
+    final dynamic country = result.data?['country'];
+    if (country is Map<String, dynamic>) return country;
+    return null;
+  }
 }

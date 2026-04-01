@@ -1,4 +1,5 @@
 import 'dart:ui';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import '../services/webcam_service.dart';
@@ -20,6 +21,8 @@ class GlassmorphismSheet extends StatefulWidget {
 
 class _GlassmorphismSheetState extends State<GlassmorphismSheet> {
   late Future<Map<String, dynamic>?> _webcamFuture;
+  Future<String?>? _countryNameFuture;
+  Timer? _autoRefreshTimer;
 
   String _getCleanText(dynamic value, {required String defaultValue}) {
     if (value == null) return defaultValue;
@@ -35,6 +38,21 @@ class _GlassmorphismSheetState extends State<GlassmorphismSheet> {
   void initState() {
     super.initState();
     _webcamFuture = _loadWebcam();
+    _startAutoRefresh();
+    final bool isWebcamView = widget.countryData['isWebcam'] ?? false;
+    final String countryCode = (widget.countryData['countryCode'] ?? '').toString().trim();
+    final String existingName = _getCleanText(widget.countryData['name'], defaultValue: '');
+    if (isWebcamView && existingName.isEmpty && countryCode.isNotEmpty) {
+      _countryNameFuture = WebcamService.fetchCountryNameByCode(countryCode);
+    }
+  }
+
+  void _startAutoRefresh() {
+    _autoRefreshTimer?.cancel();
+    _autoRefreshTimer = Timer.periodic(const Duration(minutes: 10), (_) {
+      if (!mounted) return;
+      _retryWebcamFetch();
+    });
   }
 
   Future<Map<String, dynamic>?> _loadWebcam() {
@@ -51,8 +69,14 @@ class _GlassmorphismSheetState extends State<GlassmorphismSheet> {
   }
 
   @override
+  void dispose() {
+    _autoRefreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // මෙය Webcam එකක්ද කියා බලමු
+    // Determine whether this sheet was opened from a webcam marker.
     bool isWebcamView = widget.countryData['isWebcam'] ?? false;
 
     return DraggableScrollableSheet(
@@ -82,29 +106,38 @@ class _GlassmorphismSheetState extends State<GlassmorphismSheet> {
                   ),
                   const SizedBox(height: 25),
 
-                  // Header Section (Emoji + Title)
-                  Row(
-                    children: [
-                      Text(countryData['emoji'] ?? '🌍', style: const TextStyle(fontSize: 40)),
-                      const SizedBox(width: 15),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              _getCleanText(countryData['name'], defaultValue: "Unknown").toUpperCase(),
-                              style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                  // Header Section (emoji + location metadata)
+                  FutureBuilder<String?>(
+                    future: _countryNameFuture,
+                    builder: (context, snapshot) {
+                      final resolvedName = _getCleanText(snapshot.data, defaultValue: '');
+                      final fallbackName = _getCleanText(widget.countryData['name'], defaultValue: 'Not available');
+                      final heading = (resolvedName.isNotEmpty ? resolvedName : fallbackName).toUpperCase();
+
+                      return Row(
+                        children: [
+                          Text(widget.countryData['emoji'] ?? '🌍', style: const TextStyle(fontSize: 40)),
+                          const SizedBox(width: 15),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  heading,
+                                  style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold),
+                                ),
+                                Text(
+                                  isWebcamView
+                                      ? "Location: ${_getCleanText(widget.countryData['city'], defaultValue: 'Not available')}"
+                                      : "Capital: ${_getCleanText(widget.countryData['capital'], defaultValue: 'Not available')}",
+                                  style: const TextStyle(color: Colors.cyanAccent, fontSize: 14),
+                                ),
+                              ],
                             ),
-                            Text(
-                              isWebcamView 
-                                ? "Location: ${_getCleanText(countryData['city'], defaultValue: 'Unknown')}"
-                                : "Capital: ${_getCleanText(countryData['capital'], defaultValue: 'N/A')}",
-                              style: const TextStyle(color: Colors.cyanAccent, fontSize: 14),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                          ),
+                        ],
+                      );
+                    },
                   ),
 
                   const SizedBox(height: 25),

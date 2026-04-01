@@ -30,14 +30,14 @@ class _WebcamPlayerScreenState extends State<WebcamPlayerScreen> {
           },
         ),
       )
-      ..loadRequest(Uri.parse(widget.url)); // Windy Player URL එක load කරනවා
+      ..loadRequest(Uri.parse(widget.url)); // Load Windy player URL.
   }
 
   @override
-void dispose() {
-  // WebView එක අයින් වන විට memory නිදහස් කිරීමට (V4 වල මෙය ස්වයංක්‍රීයව බොහෝ දුරට සිදුවේ)
-  super.dispose();
-}
+  void dispose() {
+    // Keep explicit lifecycle hook for readability.
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {

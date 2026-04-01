@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
@@ -13,6 +14,26 @@ List<Webcams> filterWebcamsWithCoordinates(List<Webcams> webcams) {
   return webcams.where((cam) {
     return cam.location?.latitude != null && cam.location?.longitude != null;
   }).toList();
+}
+
+List<String> buildCountrySuggestions({
+  required String query,
+  required Iterable<String> countryNames,
+  int maxResults = 6,
+}) {
+  final normalized = query.trim().toLowerCase();
+  if (normalized.isEmpty) return [];
+
+  final keys = countryNames.toList();
+  final startsWith = keys
+      .where((k) => k.toLowerCase().startsWith(normalized))
+      .toList()
+    ..sort();
+  final contains = keys
+      .where((k) => !startsWith.contains(k) && k.toLowerCase().contains(normalized))
+      .toList()
+    ..sort();
+  return [...startsWith, ...contains].take(maxResults).toList();
 }
 
 class MainMapScreen extends StatefulWidget {
@@ -33,6 +54,9 @@ class _MainMapScreenState extends State<MainMapScreen> {
 
   bool _isMarkersAdded = false;
   bool _isLoading = false;
+  bool _showDetailsPanel = false;
+  String? _countriesLoadError;
+  int _searchRequestId = 0;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   List<String> _searchSuggestions = [];
@@ -40,6 +64,8 @@ class _MainMapScreenState extends State<MainMapScreen> {
 
   List<dynamic> _countries = [];
   Map<String, List<dynamic>> coordsData = {};
+  String _detailsCountryName = "";
+  int _detailsWebcamCount = 0;
 
   @override
   void initState() {
@@ -90,18 +116,47 @@ class _MainMapScreenState extends State<MainMapScreen> {
     });
   }
 
-  void _onPointAnnotationTap(PointAnnotation annotation) {
+  Future<void> _onPointAnnotationTap(PointAnnotation annotation) async {
     final data = annotation.customData;
     if (data == null) return;
     final Map<dynamic, dynamic> mapData = data;
+    final parsedData = Map<String, dynamic>.from(mapData);
+    final bool isWebcam = parsedData['isWebcam'] == true;
+    if (isWebcam && webcamManager != null) {
+      final loadingAnnotation = await webcamManager!.create(
+        PointAnnotationOptions(
+          geometry: annotation.geometry,
+          textField: "⏳",
+          textSize: 20,
+        ),
+      );
+      try {
+        final lat = annotation.geometry.coordinates[1]!.toDouble();
+        final lng = annotation.geometry.coordinates[0]!.toDouble();
+        final nearestWebcam = await WebcamService.getWebcam(lat, lng);
+        final previewUrl = nearestWebcam?['images']?['current']?['preview'] as String?;
+        if (previewUrl != null && previewUrl.isNotEmpty) {
+          await WebcamService.prefetchPreviewImage(previewUrl);
+        }
+      } catch (_) {
+        // Non-blocking micro-interaction helper; ignore warm-up failures.
+      } finally {
+        await webcamManager!.delete(loadingAnnotation);
+      }
+    }
 
+    if (!mounted) return;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => GlassmorphismSheet(
-        countryData: Map<String, dynamic>.from(mapData),
-        location: annotation.geometry,
+      builder: (context) => AnimatedOpacity(
+        duration: const Duration(milliseconds: 280),
+        opacity: 1,
+        child: GlassmorphismSheet(
+          countryData: parsedData,
+          location: annotation.geometry,
+        ),
       ),
     );
   }
@@ -144,45 +199,123 @@ class _MainMapScreenState extends State<MainMapScreen> {
     }
   }
 
-  /// Fetch and render webcam markers based on selected country code
-  void _fetchAndShowWebcams(String countryCode) async {
-    setState(() => _isLoading = true);
-    try {
-      final List<Webcams> webcams = await WebcamService.fetchWebcams(countryCode);
+  Future<void> _searchAndFly(String searchKey) async {
+    final coords = coordsData[searchKey];
+    if (coords == null || coords.length < 2) {
+      _showSnackBar("No coordinates found for \"$searchKey\".");
+      return;
+    }
 
-      if (!mounted || webcamManager == null) return;
+    final country = _countries.firstWhere(
+      (c) => c['name'].toLowerCase() == searchKey.toLowerCase(),
+      orElse: () => null,
+    );
+    if (country == null || country['code'] == null) {
+      _showSnackBar("Country details are still loading. Please try again.");
+      return;
+    }
+
+    final String countryCode = country['code'].toString().toUpperCase();
+    final double lat = (coords[0] as num).toDouble();
+    final double lng = (coords[1] as num).toDouble();
+
+    // Non-blocking fly: start camera animation immediately.
+    mapboxMap?.flyTo(
+      CameraOptions(
+        center: Point(coordinates: Position(lng, lat)),
+        zoom: 6,
+      ),
+      MapAnimationOptions(duration: 2000),
+    );
+
+    final int requestId = ++_searchRequestId;
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _showSuggestions = false;
+        _showDetailsPanel = false;
+      });
+    }
+
+    try {
+      // Parallel fetching during flight:
+      // - GraphQL country metadata
+      // - Windy country webcams
+      // - Windy nearest webcam (used for prefetching preview/stream)
+      final results = await Future.wait<dynamic>([
+        GraphQLService.fetchCountryByCode(countryCode),
+        WebcamService.fetchWebcams(countryCode),
+        WebcamService.getWebcam(lat, lng),
+      ]);
+
+      if (!mounted || webcamManager == null || requestId != _searchRequestId) return;
+
+      final Map<String, dynamic>? countryMeta = results[0] as Map<String, dynamic>?;
+      final List<Webcams> webcams = results[1] as List<Webcams>;
+      final Map<String, dynamic>? nearestWebcam = results[2] as Map<String, dynamic>?;
 
       await webcamManager!.deleteAll();
 
       final validWebcams = filterWebcamsWithCoordinates(webcams);
-
       if (validWebcams.isEmpty) {
         _showSnackBar("No active webcams found in this region.");
-      } else {
-        List<PointAnnotationOptions> webcamMarkers = validWebcams.map((cam) {
-          return PointAnnotationOptions(
-            geometry: Point(
-              coordinates: Position(
-                cam.location!.longitude!,
-                cam.location!.latitude!,
-              ),
-            ),
-            image: markerIconBytes,
-            iconSize: 0.08,
-            customData: {
-              "title": cam.title ?? "Unknown Webcam",
-              "countryCode": countryCode, // To handle region-specific data
-              "isWebcam": true,
-            },
-          );
-        }).toList();
+        return;
+      }
 
-        await webcamManager!.createMulti(webcamMarkers);
+      // Pre-fetch preview image and stream metadata while map is moving.
+      final String? previewUrl = nearestWebcam?['images']?['current']?['preview'] as String?;
+      if (previewUrl != null && previewUrl.isNotEmpty) {
+        unawaited(WebcamService.prefetchPreviewImage(previewUrl));
+      }
+
+      List<PointAnnotationOptions> webcamMarkers = validWebcams.map((cam) {
+        final city = cam.location?.city?.trim();
+        final countryFromWebcam = cam.location?.country?.trim();
+        final title = (cam.title?.trim().isNotEmpty ?? false)
+            ? cam.title!.trim()
+            : (city != null && city.isNotEmpty)
+                ? "Webcam - $city"
+                : (cam.webcamId != null ? "Webcam #${cam.webcamId}" : "Live webcam");
+        return PointAnnotationOptions(
+          geometry: Point(
+            coordinates: Position(
+              cam.location!.longitude!,
+              cam.location!.latitude!,
+            ),
+          ),
+          image: markerIconBytes,
+          iconSize: 0.08,
+          customData: {
+            "title": title,
+            "name": countryFromWebcam?.isNotEmpty == true
+                ? countryFromWebcam
+                : (countryMeta?['name'] ?? searchKey),
+            "city": (city != null && city.isNotEmpty)
+                ? city
+                : (nearestWebcam?['location']?['city'] ?? "Not available"),
+            "capital": countryMeta?['capital'] ?? "Not available",
+            "emoji": countryMeta?['emoji'] ?? "🎥",
+            "countryCode": countryCode,
+            "isWebcam": true,
+          },
+        );
+      }).toList();
+
+      await webcamManager!.createMulti(webcamMarkers);
+      if (mounted && requestId == _searchRequestId) {
+        setState(() {
+          _detailsCountryName = countryMeta?['name']?.toString() ?? searchKey;
+          _detailsWebcamCount = validWebcams.length;
+          _showDetailsPanel = true;
+        });
       }
     } catch (e) {
-      debugPrint("❌ Webcam fetch error: $e");
+      debugPrint("Search and fly load error: $e");
+      _showSnackBar("Could not load live webcam data. Please try again.");
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted && requestId == _searchRequestId) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -195,37 +328,15 @@ class _MainMapScreenState extends State<MainMapScreen> {
     );
 
     if (searchKey.isNotEmpty) {
-      final coords = coordsData[searchKey]!;
-      
-      mapboxMap?.flyTo(
-        CameraOptions(
-          center: Point(coordinates: Position(coords[1], coords[0])),
-          zoom: 6,
-        ),
-        MapAnimationOptions(duration: 2000),
-      );
-
-      final country = _countries.firstWhere(
-        (c) => c['name'].toLowerCase() == searchKey.toLowerCase(),
-        orElse: () => null,
-      );
-
-      if (country != null) {
-        _fetchAndShowWebcams(country['code']);
-      }
-      if (mounted) {
-        setState(() {
-          _showSuggestions = false;
-        });
-      }
+      _searchAndFly(searchKey);
     } else {
       _showSnackBar("No country found for \"$value\".");
     }
   }
 
   void _handleSearchInputChanged() {
-    final query = _searchController.text.trim().toLowerCase();
-    if (query.isEmpty) {
+    final query = _searchController.text;
+    if (query.trim().isEmpty) {
       if (mounted) {
         setState(() {
           _searchSuggestions = [];
@@ -235,19 +346,12 @@ class _MainMapScreenState extends State<MainMapScreen> {
       return;
     }
 
-    final keys = coordsData.keys.toList();
-    final startsWith = keys
-        .where((k) => k.toLowerCase().startsWith(query))
-        .toList()
-      ..sort();
-    final contains = keys
-        .where((k) => !startsWith.contains(k) && k.toLowerCase().contains(query))
-        .toList()
-      ..sort();
-
     if (mounted) {
       setState(() {
-        _searchSuggestions = [...startsWith, ...contains].take(6).toList();
+        _searchSuggestions = buildCountrySuggestions(
+          query: query,
+          countryNames: coordsData.keys,
+        );
         _showSuggestions = _searchFocusNode.hasFocus;
       });
     }
@@ -296,6 +400,12 @@ class _MainMapScreenState extends State<MainMapScreen> {
               fetchPolicy: FetchPolicy.cacheFirst,
             ),
             builder: (result, {refetch, fetchMore}) {
+              if (result.hasException) {
+                _countriesLoadError ??= result.exception.toString();
+              } else if (!result.isLoading) {
+                _countriesLoadError = null;
+              }
+
               if (!result.isLoading && !result.hasException && countryManager != null) {
                 final countries = result.data?['countries'] ?? [];
                 WidgetsBinding.instance.addPostFrameCallback((_) => _addCountryMarkers(countries));
@@ -304,11 +414,85 @@ class _MainMapScreenState extends State<MainMapScreen> {
             },
           ),
 
+          if (_countriesLoadError != null)
+            Positioned(
+              top: 120,
+              left: 20,
+              right: 20,
+              child: Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.redAccent.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.redAccent.withValues(alpha: 0.6)),
+                ),
+                child: const Text(
+                  "Country metadata could not be loaded. Please check your connection and reload.",
+                  style: TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ),
+            ),
+
           _buildTopSearchBar(),
 
-          if (_isLoading)
-            const Center(child: CircularProgressIndicator(color: Colors.cyanAccent)),
+          if (_isLoading) _buildTopLinearLoader(),
+          _buildDetailsPanel(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTopLinearLoader() {
+    return Positioned(
+      left: 20,
+      right: 20,
+      top: 116,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(4),
+        child: const SizedBox(
+          height: 3,
+          child: LinearProgressIndicator(
+            backgroundColor: Colors.white12,
+            color: Colors.cyanAccent,
+            minHeight: 3,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailsPanel() {
+    return Positioned(
+      left: 20,
+      right: 20,
+      bottom: 24,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeOut,
+        opacity: _showDetailsPanel ? 1 : 0,
+        child: IgnorePointer(
+          ignoring: !_showDetailsPanel,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF121224).withValues(alpha: 0.9),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: Colors.white12),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.videocam, color: Colors.cyanAccent, size: 18),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    "$_detailsWebcamCount live webcams loaded for $_detailsCountryName",
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -318,16 +502,16 @@ class _MainMapScreenState extends State<MainMapScreen> {
       top: 60,
       left: 20,
       right: 20,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFF1A1A2E).withValues(alpha: 0.95),
-              borderRadius: BorderRadius.circular(15),
-              boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10, spreadRadius: 2)],
-            ),
-            child: TextField(
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A1A2E).withValues(alpha: 0.95),
+          borderRadius: BorderRadius.circular(15),
+          boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10, spreadRadius: 2)],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
               controller: _searchController,
               focusNode: _searchFocusNode,
               style: const TextStyle(color: Colors.white),
@@ -348,39 +532,39 @@ class _MainMapScreenState extends State<MainMapScreen> {
               ),
               onSubmitted: _handleSearch,
             ),
-          ),
-          if (_showSuggestions)
-            Container(
-              margin: const EdgeInsets.only(top: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF121224).withValues(alpha: 0.95),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.white12),
-              ),
-              child: _searchSuggestions.isEmpty
-                  ? const ListTile(
-                      dense: true,
-                      leading: Icon(Icons.info_outline, color: Colors.white38, size: 18),
-                      title: Text(
-                        "No matching countries",
-                        style: TextStyle(color: Colors.white54, fontSize: 13),
+            if (_showSuggestions)
+              Container(
+                margin: const EdgeInsets.only(top: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF121224).withValues(alpha: 0.95),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white12),
+                ),
+                child: _searchSuggestions.isEmpty
+                    ? const ListTile(
+                        dense: true,
+                        leading: Icon(Icons.info_outline, color: Colors.white38, size: 18),
+                        title: Text(
+                          "No matching countries",
+                          style: TextStyle(color: Colors.white54, fontSize: 13),
+                        ),
+                      )
+                    : Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: _searchSuggestions.map((country) {
+                          return ListTile(
+                            dense: true,
+                            title: Text(
+                              country,
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            onTap: () => _selectCountry(country),
+                          );
+                        }).toList(),
                       ),
-                    )
-                  : Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: _searchSuggestions.map((country) {
-                        return ListTile(
-                          dense: true,
-                          title: Text(
-                            country,
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                          onTap: () => _selectCountry(country),
-                        );
-                      }).toList(),
-                    ),
-            ),
-        ],
+              ),
+          ],
+        ),
       ),
     );
   }

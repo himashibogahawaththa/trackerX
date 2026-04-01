@@ -5,8 +5,16 @@ import 'package:global_vms_tracker/screens/webcam_player_screen.dart';
 class WebcamCard extends StatelessWidget {
   final Map<String, dynamic>? webcamData;
   final bool isLoading;
+  final bool hasError;
+  final VoidCallback? onRetry;
 
-  const WebcamCard({super.key, this.webcamData, required this.isLoading});
+  const WebcamCard({
+    super.key,
+    this.webcamData,
+    required this.isLoading,
+    this.hasError = false,
+    this.onRetry,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -19,17 +27,22 @@ class WebcamCard extends StatelessWidget {
       );
     }
 
-    // 🔴 Empty Data Handling (ශ්‍රී ලංකාව වගේ දත්ත නැති තැන් සඳහා)
+    if (hasError) {
+      return _buildErrorState();
+    }
+
+    // Handle cases where the API returns no webcam records.
     if (webcamData == null || 
         webcamData!.isEmpty || 
         (webcamData!.containsKey('total') && webcamData!['total'] == 0)) {
       return _buildNoDataMessage();
     }
 
-    // දත්ත නිවැරදිව කියවා ගැනීම සහ N/A handle කිරීම
+    // Resolve title from API fields with graceful fallback.
     final dynamic rawTitle = webcamData?['title'];
-    String displayTitle = "තොරතුරු ලබාගත නොහැක";
-    
+    final dynamic webcamId = webcamData?['webcamId'];
+    String displayTitle = webcamId != null ? "Webcam #$webcamId" : "Webcam details unavailable";
+
     if (rawTitle != null && rawTitle.toString().isNotEmpty) {
       String titleStr = rawTitle.toString().toUpperCase();
       if (titleStr != "N/A" && titleStr != "UNKNOWN") {
@@ -39,12 +52,25 @@ class WebcamCard extends StatelessWidget {
 
     final String? imageUrl = webcamData?['images']?['current']?['preview'];
     final String? updateTime = webcamData?['lastUpdatedOn'];
+    final String imageCacheKey = webcamData?['webcamId'] != null
+        ? "${webcamData!['webcamId']}-${updateTime ?? DateTime.now().millisecondsSinceEpoch}"
+        : (updateTime ?? DateTime.now().millisecondsSinceEpoch.toString());
+    final String? imageUrlWithBust = imageUrl == null
+        ? null
+        : "$imageUrl${imageUrl.contains('?') ? '&' : '?'}_ts=${DateTime.now().millisecondsSinceEpoch}";
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // මාතෘකාව සහ Live Badge එක
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.28),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+        // Title and live badge
         Row(
           children: [
             Expanded(
@@ -72,16 +98,23 @@ class WebcamCard extends StatelessWidget {
                   style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold)
                 ),
               ),
+            if (onRetry != null)
+              IconButton(
+                tooltip: "Refresh feed",
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh, color: Colors.cyanAccent, size: 18),
+              ),
           ],
         ),
         const SizedBox(height: 12),
 
-        // සජීවී රූපරාමුව (Preview Image)
+        // Live preview image
         ClipRRect(
           borderRadius: BorderRadius.circular(15),
-          child: imageUrl != null
+          child: imageUrlWithBust != null
               ? CachedNetworkImage(
-                  imageUrl: imageUrl,
+                  imageUrl: imageUrlWithBust,
+                  cacheKey: imageCacheKey,
                   placeholder: (context, url) => _buildImagePlaceholder(),
                   errorWidget: (context, url, error) => _buildErrorWidget(),
                   fit: BoxFit.cover,
@@ -93,26 +126,37 @@ class WebcamCard extends StatelessWidget {
 
         const SizedBox(height: 10),
 
-        // අවසන් වරට යාවත්කාලීන වූ වෙලාව
+        // Last updated time
         Row(
           children: [
             const Icon(Icons.access_time, size: 14, color: Colors.white54),
             const SizedBox(width: 5),
             Text(
-              "අවසන් වරට යාවත්කාලීන වූයේ: ${_formatDate(updateTime)}",
+              "Last updated: ${_formatDate(updateTime)}",
               style: const TextStyle(color: Colors.white54, fontSize: 12),
             ),
           ],
         ),
 
-        const SizedBox(height: 20),
+        const SizedBox(height: 18),
+        _buildPlayerButton(
+          context,
+          "Live",
+          webcamData?['player']?['live'],
+          Icons.live_tv,
+          Colors.redAccent,
+          isFullWidth: true,
+          isPrimary: true,
+        ),
+
+        const SizedBox(height: 12),
         const Text(
-          "විකාශන කාලරාමුව තෝරන්න:",
+          "Choose timeline:",
           style: TextStyle(color: Colors.cyanAccent, fontSize: 13, fontWeight: FontWeight.w500),
         ),
         const SizedBox(height: 10),
 
-        // බටන් Grid එක (ලින්ක් එක නැතිනම් Disable වේ)
+        // Timeline grid (disabled when API URL is missing)
         GridView.count(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
@@ -121,31 +165,28 @@ class WebcamCard extends StatelessWidget {
           crossAxisSpacing: 10,
           childAspectRatio: 3.2,
           children: [
-            _buildPlayerButton(context, "සජීවී (Live)", webcamData?['player']?['live'], Icons.live_tv, Colors.redAccent),
-            _buildPlayerButton(context, "අද (Day)", webcamData?['player']?['day'], Icons.today, Colors.orangeAccent),
-            _buildPlayerButton(context, "මාසය (Month)", webcamData?['player']?['month'], Icons.calendar_month, Colors.blueAccent),
-            _buildPlayerButton(context, "වසර (Year)", webcamData?['player']?['year'], Icons.history, Colors.greenAccent),
+            _buildPlayerButton(context, "Today", webcamData?['player']?['day'], Icons.today, Colors.orangeAccent),
+            _buildPlayerButton(context, "Month", webcamData?['player']?['month'], Icons.calendar_month, Colors.blueAccent),
+            _buildPlayerButton(context, "Year", webcamData?['player']?['year'], Icons.history, Colors.greenAccent),
+            _buildPlayerButton(context, "All Time", webcamData?['player']?['lifetime'], Icons.all_inclusive, Colors.purpleAccent),
           ],
         ),
-
-        const SizedBox(height: 10),
-        
-        // Lifetime බටන් එක (Full Width)
-        _buildPlayerButton(
-          context, 
-          "සම්පූර්ණ කාලය (Lifetime)", 
-          webcamData?['player']?['lifetime'], 
-          Icons.all_inclusive, 
-          Colors.purpleAccent, 
-          isFullWidth: true
-        ),
       ],
+      ),
     );
   }
 
-  // බටන් එක නිර්මාණය කරන පොදු Method එක
-  Widget _buildPlayerButton(BuildContext context, String label, String? url, IconData icon, Color color, {bool isFullWidth = false}) {
-    // URL එක null/empty/NA නම් disable වේ
+  // Shared player button builder.
+  Widget _buildPlayerButton(
+    BuildContext context,
+    String label,
+    String? url,
+    IconData icon,
+    Color color, {
+    bool isFullWidth = false,
+    bool isPrimary = false,
+  }) {
+    // Disable when URL is null, empty, or placeholder-like.
     bool isDisabled = (url == null || url.isEmpty);
     if (!isDisabled) {
       String urlUpper = url.toString().toUpperCase();
@@ -158,14 +199,27 @@ class WebcamCard extends StatelessWidget {
       width: isFullWidth ? double.infinity : null,
       child: ElevatedButton.icon(
         style: ElevatedButton.styleFrom(
-          backgroundColor: isDisabled ? Colors.white.withValues(alpha: 0.05) : color.withValues(alpha: 0.1),
-          foregroundColor: isDisabled ? Colors.white12 : color,
-          side: BorderSide(color: isDisabled ? Colors.white10 : color.withValues(alpha: 0.3)),
+          backgroundColor: isDisabled
+              ? Colors.white.withValues(alpha: 0.05)
+              : isPrimary
+                  ? color.withValues(alpha: 0.9)
+                  : color.withValues(alpha: 0.14),
+          foregroundColor: isDisabled ? Colors.white12 : (isPrimary ? Colors.white : color),
+          side: BorderSide(color: isDisabled ? Colors.white10 : color.withValues(alpha: 0.4)),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           elevation: 0,
         ),
-        onPressed: isDisabled ? null : () {
+        onPressed: () {
+          if (isDisabled) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("This stream is not available right now."),
+                backgroundColor: Colors.orangeAccent,
+              ),
+            );
+            return;
+          }
           Navigator.push(
             context,
             MaterialPageRoute(
@@ -176,30 +230,30 @@ class WebcamCard extends StatelessWidget {
             ),
           );
         },
-        icon: Icon(icon, size: 16, color: isDisabled ? Colors.white12 : color),
+        icon: Icon(icon, size: 16, color: isDisabled ? Colors.white12 : (isPrimary ? Colors.white : color)),
         label: Text(
           label, 
           style: TextStyle(
             fontSize: 11, 
             fontWeight: FontWeight.bold,
-            color: isDisabled ? Colors.white12 : color
+            color: isDisabled ? Colors.white12 : (isPrimary ? Colors.white : color),
           )
         ),
       ),
     );
   }
 
-  // දිනය format කරන ආකාරය
+  // Format date output safely.
   String _formatDate(String? dateStr) {
-    if (dateStr == null || dateStr.isEmpty) return "දැනට වාර්තා වී නැත";
+    if (dateStr == null || dateStr.isEmpty) return "No recent update";
     
     String checkStr = dateStr.toUpperCase();
-    if (checkStr == "UNKNOWN" || checkStr == "N/A") return "දැනට වාර්තා වී නැත";
+    if (checkStr == "UNKNOWN" || checkStr == "N/A") return "No recent update";
 
     try {
       return dateStr.split('T')[0];
     } catch (e) {
-      return "දත්ත දෝෂයකි";
+      return "Invalid date value";
     }
   }
 
@@ -222,13 +276,13 @@ class WebcamCard extends StatelessWidget {
         children: [
           Icon(Icons.videocam_off, size: 40, color: Colors.white24),
           SizedBox(height: 8),
-          Text("සජීවී රූපරාමු ලබාගත නොහැක", style: TextStyle(color: Colors.white24, fontSize: 12)),
+          Text("Live preview unavailable", style: TextStyle(color: Colors.white24, fontSize: 12)),
         ],
       ),
     );
   }
 
-  // 🔴 ලස්සන Empty State Message එකක්
+  // Empty state when no webcam is available for the selected area.
   Widget _buildNoDataMessage() {
     return Center(
       child: Padding(
@@ -243,7 +297,7 @@ class WebcamCard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             const Text(
-              "දත්ත කිසිවක් හමු නොවීය",
+              "No webcam data found",
               style: TextStyle(
                 color: Colors.white,
                 fontSize: 16,
@@ -252,13 +306,45 @@ class WebcamCard extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              "මෙම ප්‍රදේශයේ සජීවී වෙබ් කැමරා දත්ත දැනට පද්ධතියේ වාර්තා වී නොමැත.",
+              "There are no active webcams reported for this area at the moment.",
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: Colors.white.withValues(alpha: 0.5),
                 fontSize: 12,
                 height: 1.5,
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildErrorState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 30, horizontal: 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.wifi_off, size: 42, color: Colors.orangeAccent),
+            const SizedBox(height: 10),
+            const Text(
+              "Could not load webcam details.",
+              style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              "Check your connection and try again.",
+              style: TextStyle(color: Colors.white60, fontSize: 12),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh, color: Colors.cyanAccent),
+              label: const Text("Retry", style: TextStyle(color: Colors.cyanAccent)),
             ),
           ],
         ),
