@@ -1,32 +1,32 @@
-import 'dart:io'; // 1. HttpOverrides සඳහා අනිවාර්යයි
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:graphql_flutter/graphql_flutter.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'screens/splash_screen.dart';
 
-// 2. SSL/Handshake ගැටලුව විසඳීමට මෙය එක් කරන්න
-class MyHttpOverrides extends HttpOverrides {
-  @override
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context)
-      ..badCertificateCallback = (X509Certificate cert, String host, int port) => true;
-  }
+/// Global Configuration constants for better maintainability
+class AppConfig {
+  static const String mapboxToken = 'pk.eyJ1IjoiaGF6ZWxsbGxsbCIsImEiOiJjbW44MWVqM3IwNnY5MnBxcjg1YXcxZXMyIn0.MG8cXDNeci47K_xRGWZ8Dw';
+  static const String graphqlEndpoint = 'https://countries.trevorblades.com/';
 }
 
 void main() async {
-  // Flutter Engine එක initialize කිරීම
   WidgetsFlutterBinding.ensureInitialized();
 
-  // 3. SSL Handshake Bypass කිරීම මෙතැනදී ක්‍රියාත්මක කරන්න
-  HttpOverrides.global = MyHttpOverrides();
+  /// Handle SSL handshake errors only in development mode to maintain security in production
+  if (kDebugMode) {
+    HttpOverrides.global = DevHttpOverrides();
+  }
 
-  // Mapbox Access Token එක ලබා දීම
-  MapboxOptions.setAccessToken('pk.eyJ1IjoiaGF6ZWxsbGxsbCIsImEiOiJjbW44MWVqM3IwNnY5MnBxcjg1YXcxZXMyIn0.MG8cXDNeci47K_xRGWZ8Dw');
+  /// Initialize Mapbox with the access token
+  MapboxOptions.setAccessToken(AppConfig.mapboxToken);
 
+  /// Initialize Hive for GraphQL caching to improve offline performance
   await initHiveForFlutter();
 
-  final HttpLink httpLink = HttpLink('https://countries.trevorblades.com/');
-
+  final HttpLink httpLink = HttpLink(AppConfig.graphqlEndpoint);
+  
   final ValueNotifier<GraphQLClient> client = ValueNotifier(
     GraphQLClient(
       link: httpLink,
@@ -37,27 +37,48 @@ void main() async {
   runApp(
     GraphQLProvider(
       client: client,
-      child: const WorldExplorerApp(),
+      child: const GlobalWebcamMonitorApp(),
     ),
   );
 }
 
-class WorldExplorerApp extends StatelessWidget {
-  const WorldExplorerApp({super.key});
+/// Custom HttpOverrides to bypass self-signed certificate errors during development
+class DevHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback = (X509Certificate cert, String host, int port) => true;
+  }
+}
+
+class GlobalWebcamMonitorApp extends StatelessWidget {
+  const GlobalWebcamMonitorApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Global VMS Tracker', // App එකේ නම මෙතැනත් වෙනස් කළා
+      title: 'Global Webcam Monitor',
       debugShowCheckedModeBanner: false,
       
+      /// Implementing a modern Dark Theme using Material 3
       theme: ThemeData(
+        useMaterial3: true,
         brightness: Brightness.dark,
-        primarySwatch: Colors.cyan,
-        scaffoldBackgroundColor: const Color(0xFF1A1A2E), 
-        fontFamily: 'Roboto', 
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: Colors.cyanAccent,
+          brightness: Brightness.dark,
+          surface: const Color(0xFF1A1A2E), 
+          primary: Colors.cyanAccent,
+        ),
+        scaffoldBackgroundColor: const Color(0xFF1A1A2E),
+        fontFamily: 'Roboto',
+        
+        /// Typography optimization for better readability
+        textTheme: const TextTheme(
+          titleLarge: TextStyle(fontWeight: FontWeight.bold, color: Colors.white),
+          bodyMedium: TextStyle(color: Colors.white70),
+        ),
       ),
-      
       home: const SplashScreen(),
     );
   }
